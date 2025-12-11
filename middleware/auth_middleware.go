@@ -2,7 +2,7 @@ package middleware
 
 import (
 	"strings"
-	"UAS_BE/utils"
+	"UASBE/utils"
 
 	"github.com/gofiber/fiber/v2"
 )
