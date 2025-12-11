@@ -3,7 +3,7 @@ package repository
 import (
 	"database/sql"
 	"errors"
-	"UASBE/model"
+	"UASBE/app/model"
 )
 
 type AuthRepository interface {

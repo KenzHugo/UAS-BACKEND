@@ -3,7 +3,7 @@ package service
 import (
 	"errors"
 	"UASBE/app/repository"
-	"UASBE/model"
+	"UASBE/app/model"
 	"UASBE/utils"
 	"strings"
 )

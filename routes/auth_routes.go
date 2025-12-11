@@ -3,7 +3,7 @@ package routes
 import (
 	"UASBE/app/service"
 	"UASBE/middleware"
-	"UASBE/model"
+	"UASBE/app/model"
 	"UASBE/utils"
 
 	"github.com/gofiber/fiber/v2"
