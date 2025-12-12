@@ -163,10 +163,6 @@ func seedUsers(db *sql.DB) error {
 		isActive  bool
 	}{
 		{"admin", "admin@example.com", defaultPassword, "Administrator", "Admin", true},
-		{"mahasiswa1", "mahasiswa1@example.com", defaultPassword, "Budi Santoso", "Mahasiswa", true},
-		{"mahasiswa2", "mahasiswa2@example.com", defaultPassword, "Siti Aminah", "Mahasiswa", true},
-		{"dosenwali1", "dosenwali1@example.com", defaultPassword, "Dr. Ahmad Rahman", "Dosen Wali", true},
-		{"dosenwali2", "dosenwali2@example.com", defaultPassword, "Dr. Dewi Sartika", "Dosen Wali", true},
 	}
 
 	for _, user := range users {
