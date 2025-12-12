@@ -1,11 +1,14 @@
 package model
 
-import "github.com/google/uuid"
+import "time"
 
-type Permissions struct {
-	ID          uuid.UUID `json:"id"`
-	Name        string    `json:"name"`
-	Resource    string    `json:"resource"`
-	Action      string    `json:"action"`
-	Description string    `json:"description"`
+type Permission struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type PermissionResponse struct {
+	Name string `json:"name"`
 }

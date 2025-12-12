@@ -1,73 +1,90 @@
 package main
 
 import (
+	"database/sql"
 	"log"
-	"os"
+
 	"UASBE/config"
 	"UASBE/database"
 	"UASBE/routes"
+	"UASBE/app/repository"
+	"UASBE/app/service"
+	"UASBE/middleware"
 
-	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/logger"
 )
 
 func main() {
-	// Load .env file
-	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, using environment variables")
-	}
 
-	// Initialize database connections
-	db, err := config.ConnectPostgres()
+	config.LoadEnv()
+
+	// Connect database (sql.DB)
+	db, err := sql.Open("postgres", config.AppConfig.DBUrl)
 	if err != nil {
-		log.Fatal("Failed to connect to PostgreSQL:", err)
+		log.Fatal("Failed connect:", err)
 	}
 	defer db.Close()
 
-	// Run migrations
+	// Test connection
+	if err := db.Ping(); err != nil {
+		log.Fatal("Failed ping database:", err)
+	}
+	log.Println("✅ Database connected!")
+
+	// Run migration
 	if err := database.RunMigrations(db); err != nil {
-		log.Fatal("Failed to run migrations:", err)
+		log.Fatal("Migration failed:", err)
 	}
 
-	// Run seeders (optional, comment out after first run)
+	// Run seeder
 	if err := database.RunSeeders(db); err != nil {
-		log.Fatal("Failed to run seeders:", err)
+		log.Fatal("Seeder failed:", err)
 	}
 
-	// Initialize Gin router
-	router := gin.Default()
+	// Initialize Fiber app
+	app := fiber.New(fiber.Config{
+		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			code := fiber.StatusInternalServerError
+			if e, ok := err.(*fiber.Error); ok {
+				code = e.Code
+			}
+			return c.Status(code).JSON(fiber.Map{
+				"status": "error",
+				"error":  err.Error(),
+			})
+		},
+	})
 
-	// Setup CORS
-	router.Use(corsMiddleware())
+	// Middleware
+	app.Use(logger.New())
+	app.Use(cors.New())
 
-	// Setup routes
-	routes.SetupRoutes(router, db)
+	// ⭐ PENTING: Initialize Repositories
+	userRepo := repository.NewUserRepository(db)
+	roleRepo := repository.NewRoleRepository(db)
+	permRepo := repository.NewPermissionRepository(db)
 
-	// Get port from env or default to 8080
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
+	// ⭐ PENTING: Initialize Services
+	authService := service.NewAuthService(userRepo, roleRepo, permRepo)
+
+	// ⭐ PENTING: Initialize Middleware
+	authMiddleware := middleware.AuthRequired
+
+	// ⭐ PENTING: Setup Routes (INI YANG KURANG!)
+	routes.AuthRoutes(app, authService, authMiddleware)
+
+	// Health check endpoint
+	app.Get("/", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{
+			"status":  "success",
+			"message": "API is running",
+		})
+	})
 
 	// Start server
-	log.Printf("Server starting on port %s...", port)
-	if err := router.Run(":" + port); err != nil {
-		log.Fatal("Failed to start server:", err)
-	}
-}
-
-func corsMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
-			return
-		}
-
-		c.Next()
-	}
+	log.Println("🚀 Server starting on http://localhost:3000")
+	log.Fatal(app.Listen(":3000"))
 }

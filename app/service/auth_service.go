@@ -1,155 +1,197 @@
 package service
 
 import (
-	"errors"
-	"UASBE/app/repository"
+	"github.com/gofiber/fiber/v2"
+	"github.com/golang-jwt/jwt/v5"
+
 	"UASBE/app/model"
+	"UASBE/app/repository"
 	"UASBE/utils"
-	"strings"
 )
 
-type AuthService interface {
-	Login(req model.LoginRequest) (*model.LoginResponse, error)
-	RefreshToken(refreshToken string) (*model.LoginResponse, error)
-	GetProfile(userID string) (*model.UserProfile, error)
+type AuthService struct {
+	userRepo repository.UserRepository
+	roleRepo repository.RoleRepository
+	permRepo repository.PermissionRepository
 }
 
-type authService struct {
-	authRepo repository.AuthRepository
-}
-
-func NewAuthService(authRepo repository.AuthRepository) AuthService {
-	return &authService{
-		authRepo: authRepo,
+func NewAuthService(
+	user repository.UserRepository,
+	role repository.RoleRepository,
+	perm repository.PermissionRepository,
+) *AuthService {
+	return &AuthService{
+		userRepo: user,
+		roleRepo: role,
+		permRepo: perm,
 	}
 }
 
-// FR-001: Login
-// Flow:
-// 1. User mengirim kredensial
-// 2. Sistem memvalidasi kredensial
-// 3. Sistem mengecek status aktif user
-// 4. Sistem generate JWT token dengan role dan permissions
-// 5. Return token dan user profile
-func (s *authService) Login(req model.LoginRequest) (*model.LoginResponse, error) {
-	// Step 1: Find user by username or email
-	var user *model.User
-	var err error
+//
+// ==================== LOGIN ======================
+//
 
-	// Check if input is email or username
-	if strings.Contains(req.Username, "@") {
-		user, err = s.authRepo.FindUserByEmail(req.Username)
-	} else {
-		user, err = s.authRepo.FindUserByUsername(req.Username)
+func (s *AuthService) Login(c *fiber.Ctx) error {
+
+	req := new(model.LoginRequest)
+
+	if err := c.BodyParser(req); err != nil {
+		return c.Status(400).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "invalid request body",
+		})
 	}
 
+	// cek username
+	user, err := s.userRepo.FindByUsername(req.Username)
 	if err != nil {
-		return nil, errors.New("invalid credentials")
+		return c.Status(401).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "invalid username or password",
+		})
 	}
 
-	// Step 2: Validate password
+	// cek password
 	if !utils.CheckPasswordHash(req.Password, user.PasswordHash) {
-		return nil, errors.New("invalid credentials")
+		return c.Status(401).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "invalid username or password",
+		})
 	}
 
-	// Step 3: Check if user is active
-	if !user.IsActive {
-		return nil, errors.New("user account is inactive")
-	}
+	// ambil role
+	role, _ := s.roleRepo.GetRoleByID(user.RoleID)
 
-	// Get user with role and permissions
-	userWithRole, err := s.authRepo.GetUserWithRole(user.ID)
-	if err != nil {
-		return nil, err
-	}
+	// ambil permission by role
+	perms, _ := s.permRepo.GetPermissionsByRoleID(role.ID)
 
-	// Step 4: Generate JWT tokens
-	token, err := utils.GenerateToken(user.ID, userWithRole.RoleName, userWithRole.Permissions)
-	if err != nil {
-		return nil, err
-	}
-
-	refreshToken, err := utils.GenerateRefreshToken(user.ID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Step 5: Return response
-	response := &model.LoginResponse{
-		Token:        token,
-		RefreshToken: refreshToken,
-		User: model.UserProfile{
-			ID:          user.ID,
-			Username:    user.Username,
-			FullName:    user.FullName,
-			Email:       user.Email,
-			Role:        userWithRole.RoleName,
-			Permissions: userWithRole.Permissions,
-		},
-	}
-
-	return response, nil
+	// response user
+userRes := model.UserResponse{
+    ID:          user.ID,
+    Username:    user.Username,
+    Email:       user.Email,
+    FullName:    user.FullName,
+    Role:        role.Name,
+    IsActive:    user.IsActive,  // ⭐ SUDAH ADA
+    CreatedAt:   user.CreatedAt.Format("2006-01-02 15:04:05"), // ⭐ TAMBAHKAN FORMAT
+    Permissions: perms,
 }
 
-func (s *authService) RefreshToken(refreshToken string) (*model.LoginResponse, error) {
-	// Validate refresh token
-	claims, err := utils.ValidateRefreshToken(refreshToken)
-	if err != nil {
-		return nil, errors.New("invalid or expired refresh token")
-	}
+	// generate token
+	access, _ := utils.GenerateJWT(userRes)
+	refresh, _ := utils.GenerateRefreshToken(user.ID)
 
-	// Get user
-	userWithRole, err := s.authRepo.GetUserWithRole(claims.UserID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Check if user is active
-	if !userWithRole.IsActive {
-		return nil, errors.New("user account is inactive")
-	}
-
-	// Generate new tokens
-	newToken, err := utils.GenerateToken(userWithRole.ID, userWithRole.RoleName, userWithRole.Permissions)
-	if err != nil {
-		return nil, err
-	}
-
-	newRefreshToken, err := utils.GenerateRefreshToken(userWithRole.ID)
-	if err != nil {
-		return nil, err
-	}
-
-	response := &model.LoginResponse{
-		Token:        newToken,
-		RefreshToken: newRefreshToken,
-		User: model.UserProfile{
-			ID:          userWithRole.ID,
-			Username:    userWithRole.Username,
-			FullName:    userWithRole.FullName,
-			Email:       userWithRole.Email,
-			Role:        userWithRole.RoleName,
-			Permissions: userWithRole.Permissions,
+	return c.JSON(model.APIResponse{
+		Status: "success",
+		Data: model.LoginResponse{
+			Token:        access,
+			RefreshToken: refresh,
+			User:         userRes,
 		},
-	}
-
-	return response, nil
+	})
 }
 
-func (s *authService) GetProfile(userID string) (*model.UserProfile, error) {
-	userWithRole, err := s.authRepo.GetUserWithRole(userID)
+//
+// ==================== REFRESH TOKEN ======================
+//
+
+func (s *AuthService) Refresh(c *fiber.Ctx) error {
+
+	req := new(model.RefreshTokenRequest)
+	_ = c.BodyParser(req)
+
+	claims := &model.RefreshTokenClaims{}
+
+	// validasi refresh token
+	token, err := jwt.ParseWithClaims(req.RefreshToken, claims, func(t *jwt.Token) (interface{}, error) {
+		return utils.JwtKey, nil
+	})
+
+	if err != nil || !token.Valid {
+		return c.Status(401).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "invalid refresh token",
+		})
+	}
+
+	// cari user
+	user, err := s.userRepo.FindByID(claims.UserID)
 	if err != nil {
-		return nil, err
+		return c.Status(404).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "user not found",
+		})
 	}
 
-	profile := &model.UserProfile{
-		ID:          userWithRole.ID,
-		Username:    userWithRole.Username,
-		FullName:    userWithRole.FullName,
-		Email:       userWithRole.Email,
-		Role:        userWithRole.RoleName,
-		Permissions: userWithRole.Permissions,
+	// ambil role
+	role, _ := s.roleRepo.GetRoleByID(user.RoleID)
+
+	// ambil permission
+	perms, _ := s.permRepo.GetPermissionsByRoleID(role.ID)
+
+	userRes := model.UserResponse{
+    ID:          user.ID,
+    Username:    user.Username,
+    Email:       user.Email,
+    FullName:    user.FullName,
+    Role:        role.Name,
+    IsActive:    user.IsActive,                            // ✅ tambahkan
+    CreatedAt:   user.CreatedAt.Format("2006-01-02 15:04:05"), // ✅ tambahkan
+    Permissions: perms,
+}
+	// generate new tokens
+	access, _ := utils.GenerateJWT(userRes)
+	refresh, _ := utils.GenerateRefreshToken(user.ID)
+
+	return c.JSON(model.APIResponse{
+		Status: "success",
+		Data: model.LoginResponse{
+			Token:        access,
+			RefreshToken: refresh,
+			User:         userRes,
+		},
+	})
+}
+
+//
+// ==================== PROFILE ======================
+//
+
+func (s *AuthService) Profile(c *fiber.Ctx) error {
+
+	claims := c.Locals("user").(*model.JWTClaims)
+
+	user, err := s.userRepo.FindByID(claims.UserID)
+	if err != nil {
+		return c.Status(404).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "user not found",
+		})
 	}
 
-	return profile, nil
+	res := model.UserResponse{
+		ID:        user.ID,
+		Username:  user.Username,
+		Email:     user.Email,
+		FullName:  user.FullName,
+		Role:      claims.Role,
+		IsActive:  user.IsActive,
+		CreatedAt: user.CreatedAt.Format("2006-01-02 15:04:05"),
+	}
+
+	return c.JSON(model.APIResponse{
+		Status: "success",
+		Data:   res,
+	})
+}
+
+//
+// ==================== LOGOUT ======================
+//
+
+func (s *AuthService) Logout(c *fiber.Ctx) error {
+	return c.JSON(model.APIResponse{
+		Status:  "success",
+		Message: "logout successful",
+	})
 }
