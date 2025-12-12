@@ -3,11 +3,17 @@ package utils
 import (
 	"time"
 	"UASBE/app/model"
+	"UASBE/config"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
-var JwtKey = []byte("SUPER_SECRET_KEY")
+var JwtKey []byte
+
+// InitJWT - Initialize JWT key from config
+func InitJWT() {
+	JwtKey = []byte(config.AppConfig.JWTSecret)
+}
 
 func GenerateJWT(user model.UserResponse) (string, error) {
 
