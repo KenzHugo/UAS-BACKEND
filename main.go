@@ -38,18 +38,15 @@ func main() {
 	studentRepo := repository.NewStudentRepository(sqlDB)
 	lecturerRepo := repository.NewLecturerRepository(sqlDB)
 	achievementRepo := repository.NewAchievementRepository(sqlDB, database.MongoDB)
+	reportRepo := repository.NewReportRepository(sqlDB, database.MongoDB)
 
 	// Initialize services
 	authService := service.NewAuthService(userRepo, roleRepo, permRepo)
 	userService := service.NewUserService(userRepo, roleRepo, permRepo, studentRepo, lecturerRepo)
-	
-	// ⭐ UPDATE: StudentService dengan 4 parameters
 	studentService := service.NewStudentService(studentRepo, lecturerRepo, achievementRepo, userRepo)
-	
-	// ⭐ NEW: LecturerService
 	lecturerService := service.NewLecturerService(lecturerRepo, studentRepo, achievementRepo, userRepo)
-	
 	achievementService := service.NewAchievementService(achievementRepo, studentRepo, lecturerRepo, userRepo)
+	reportService := service.NewReportService(reportRepo, achievementRepo, studentRepo, lecturerRepo, userRepo) 
 
 	// Initialize Fiber app
 	app := fiber.New(fiber.Config{
@@ -80,8 +77,9 @@ func main() {
 	routes.AuthRoutes(app, authService)
 	routes.UserRoutes(app, userService)
 	routes.StudentRoutes(app, studentService)
-	routes.LecturerRoutes(app, lecturerService) // ⭐ NEW: Register lecturer routes
+	routes.LecturerRoutes(app, lecturerService)
 	routes.AchievementRoutes(app, achievementService)
+	routes.ReportRoutes(app, reportService) 
 
 	// Start server
 	port := config.AppConfig.Port

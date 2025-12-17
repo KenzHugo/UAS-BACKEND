@@ -172,3 +172,30 @@ func AchievementRoutes(app *fiber.App, achievementService *service.AchievementSe
 		achievementService.GetAchievementHistory,
 	)
 }
+
+// ==================== REPORT ROUTES ======================
+
+func ReportRoutes(app *fiber.App, reportService *service.ReportService) {
+	reports := app.Group("/api/v1/reports")
+
+	// Auth required untuk semua endpoint
+	reports.Use(middleware.AuthRequired)
+
+	// GET /api/v1/reports/statistics
+	// FR-011: Achievement Statistics
+	// Actor: Mahasiswa (own), Dosen Wali (advisee), Admin (all)
+	// Output: Total prestasi per tipe, per periode, top mahasiswa, distribusi tingkat kompetisi
+	reports.Get("/statistics",
+		middleware.RequirePermission("achievement:read"),
+		reportService.GetStatistics,
+	)
+
+	// GET /api/v1/reports/student/:id
+	// FR-011: Student Report Detail
+	// Actor: Mahasiswa (own), Dosen Wali (advisee), Admin (all)
+	// Output: Detail report mahasiswa dengan breakdown dan timeline
+	reports.Get("/student/:id",
+		middleware.RequirePermission("achievement:read"),
+		reportService.GetStudentReport,
+	)
+}
