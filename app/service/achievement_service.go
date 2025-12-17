@@ -3,15 +3,17 @@ package service
 import (
 	"fmt"
 	"math"
+	"net/http"
+	"os"
+	"path/filepath"
+	"UASBE/app/model"
+	"UASBE/app/repository"
 	"strconv"
 	"time"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
-
-	"UASBE/app/model"
-	"UASBE/app/repository"
 )
 
 type AchievementService struct {
@@ -38,46 +40,38 @@ func NewAchievementService(
 }
 
 //
-// ==================== FR-003: CREATE ACHIEVEMENT (POST /achievements) ======================
-// Actor: Mahasiswa
-// Flow:
-// 1. Mahasiswa mengisi data prestasi
-// 2. Mahasiswa upload dokumen pendukung
-// 3. Sistem simpan ke MongoDB (achievement) dan PostgreSQL (reference)
-// 4. Status awal: 'draft'
-// 5. Return achievement data
+// ==================== CREATE ACHIEVEMENT (POST /achievements) ======================
+// FR-003: Mahasiswa dapat menambahkan laporan prestasi
 //
 
 func (s *AchievementService) CreateAchievement(c *fiber.Ctx) error {
-	// Get user from JWT
-	claims := c.Locals("user").(*model.JWTClaims)
-	
-	// Verify user is Mahasiswa
-	if claims.Role != "Mahasiswa" {
-		return c.Status(403).JSON(model.APIResponse{
+	// Get user dari context
+	claims, ok := c.Locals("user").(*model.JWTClaims)
+	if !ok {
+		return c.Status(401).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "only students can create achievements",
+			Error:  "unauthorized",
 		})
 	}
-	
+
 	// Parse request
-	req := new(model.CreateAchievementRequest)
+	req := new(model.AchievementCreateRequest)
 	if err := c.BodyParser(req); err != nil {
 		return c.Status(400).JSON(model.APIResponse{
 			Status: "error",
 			Error:  "invalid request body",
 		})
 	}
-	
-	// Validate
+
+	// Validasi input
 	if err := s.validate.Struct(req); err != nil {
 		return c.Status(422).JSON(model.APIResponse{
 			Status: "error",
 			Error:  err.Error(),
 		})
 	}
-	
-	// Get student profile
+
+	// Get student profile dari user yang login
 	student, err := s.studentRepo.FindByUserID(claims.UserID)
 	if err != nil {
 		return c.Status(404).JSON(model.APIResponse{
@@ -85,47 +79,46 @@ func (s *AchievementService) CreateAchievement(c *fiber.Ctx) error {
 			Error:  "student profile not found",
 		})
 	}
-	
-	// Step 1 & 2: Create achievement in MongoDB
+
+	// Create achievement di MongoDB
 	achievement := &model.Achievement{
-		StudentID:   student.ID,
-		Type:        req.AchievementType,
-		Title:       req.Title,
-		Description: req.Description,
-		Details:     req.Details,
-		Tags:        req.Tags,
-		Points:      req.Points,
-		Attachments: []model.Attachment{}, // Will be added via separate endpoint
+		StudentID:       student.ID,
+		AchievementType: req.AchievementType,
+		Title:           req.Title,
+		Description:     req.Description,
+		Details:         req.Details,
+		Tags:            req.Tags,
+		Points:          req.Points,
+		Attachments:     []model.Attachment{}, // empty initially
 	}
-	
+
 	mongoID, err := s.achievementRepo.CreateAchievement(achievement)
 	if err != nil {
 		return c.Status(500).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "failed to create achievement in MongoDB",
+			Error:  "failed to create achievement",
 		})
 	}
-	
-	// Step 3: Create reference in PostgreSQL
-	ref := &model.AchievementReference{
-		ID:                 uuid.New().String(),
+
+	// Create reference di PostgreSQL
+	reference := &model.AchievementReference{
 		StudentID:          student.ID,
 		MongoAchievementID: mongoID,
-		Status:             "draft", // Step 4: Status awal draft
+		Status:             "draft", // Status awal: draft
 	}
-	
-	if err := s.achievementRepo.CreateReference(ref); err != nil {
-		// Rollback: delete from MongoDB
+
+	if err := s.achievementRepo.CreateReference(reference); err != nil {
+		// Rollback: hapus achievement di MongoDB
 		s.achievementRepo.DeleteAchievement(mongoID)
 		return c.Status(500).JSON(model.APIResponse{
 			Status: "error",
 			Error:  "failed to create achievement reference",
 		})
 	}
-	
-	// Step 5: Build response
-	response := s.buildAchievementResponse(ref, achievement, student, nil, nil)
-	
+
+	// Build response
+	response := s.buildAchievementResponse(achievement, reference, mongoID)
+
 	return c.Status(201).JSON(model.APIResponse{
 		Status:  "success",
 		Message: "achievement created successfully",
@@ -134,33 +127,200 @@ func (s *AchievementService) CreateAchievement(c *fiber.Ctx) error {
 }
 
 //
-// ==================== GET ACHIEVEMENTS LIST (GET /achievements) ======================
-// Actor: Mahasiswa (own), Dosen Wali (advisee), Admin (all)
-// FR-006 (partial): View Prestasi Mahasiswa Bimbingan
+// ==================== GET ACHIEVEMENT HISTORY (GET /achievements/:id/history) ======================
+// Menampilkan riwayat perubahan status achievement
+//
+
+func (s *AchievementService) GetAchievementHistory(c *fiber.Ctx) error {
+	achievementID := c.Params("id")
+
+	// Get user dari context
+	claims, ok := c.Locals("user").(*model.JWTClaims)
+	if !ok {
+		return c.Status(401).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "unauthorized",
+		})
+	}
+
+	// Get reference dari PostgreSQL
+	reference, err := s.achievementRepo.GetReferenceByID(achievementID)
+	if err != nil {
+		return c.Status(404).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "achievement not found",
+		})
+	}
+
+	// Check authorization
+	if claims.Role == "Mahasiswa" {
+		student, _ := s.studentRepo.FindByUserID(claims.UserID)
+		if student == nil || student.ID != reference.StudentID {
+			return c.Status(403).JSON(model.APIResponse{
+				Status: "error",
+				Error:  "forbidden",
+			})
+		}
+	} else if claims.Role == "Dosen Wali" {
+		lecturer, _ := s.lecturerRepo.FindByUserID(claims.UserID)
+		student, _ := s.studentRepo.FindByID(reference.StudentID)
+		if lecturer == nil || student == nil || student.AdvisorID == nil || *student.AdvisorID != lecturer.ID {
+			return c.Status(403).JSON(model.APIResponse{
+				Status: "error",
+				Error:  "forbidden",
+			})
+		}
+	}
+	// Admin dapat akses semua
+
+	// Build history
+	history := s.buildAchievementHistory(reference)
+
+	return c.JSON(model.APIResponse{
+		Status: "success",
+		Data: fiber.Map{
+			"achievement_id": achievementID,
+			"current_status": reference.Status,
+			"history":        history,
+		},
+	})
+}
+
+//
+// ==================== HELPER: BUILD ACHIEVEMENT HISTORY ======================
+//
+
+type HistoryEntry struct {
+	Status    string  `json:"status"`
+	Timestamp string  `json:"timestamp"`
+	Actor     string  `json:"actor,omitempty"`
+	ActorID   *string `json:"actor_id,omitempty"`
+	Action    string  `json:"action"`
+	Notes     *string `json:"notes,omitempty"`
+}
+
+func (s *AchievementService) buildAchievementHistory(reference *model.AchievementReference) []HistoryEntry {
+	var history []HistoryEntry
+
+	// 1. Draft/Created
+	history = append(history, HistoryEntry{
+		Status:    "draft",
+		Timestamp: reference.CreatedAt.Format("2006-01-02 15:04:05"),
+		Action:    "Achievement created",
+		Notes:     nil,
+	})
+
+	// 2. Submitted (jika ada)
+	if reference.SubmittedAt != nil {
+		history = append(history, HistoryEntry{
+			Status:    "submitted",
+			Timestamp: reference.SubmittedAt.Format("2006-01-02 15:04:05"),
+			Action:    "Submitted for verification",
+			Notes:     nil,
+		})
+	}
+
+	// 3. Verified (jika ada)
+	if reference.Status == "verified" && reference.VerifiedAt != nil {
+		var actorName string
+		var actorID *string
+
+		if reference.VerifiedBy != nil {
+			// Get verifier info
+			user, err := s.userRepo.FindByID(*reference.VerifiedBy)
+			if err == nil {
+				actorName = user.FullName + " (Dosen Wali)"
+				actorID = reference.VerifiedBy
+			}
+		}
+
+		history = append(history, HistoryEntry{
+			Status:    "verified",
+			Timestamp: reference.VerifiedAt.Format("2006-01-02 15:04:05"),
+			Actor:     actorName,
+			ActorID:   actorID,
+			Action:    "Achievement verified",
+			Notes:     nil,
+		})
+	}
+
+	// 4. Rejected (jika ada)
+	if reference.Status == "rejected" {
+		var actorName string
+		var actorID *string
+
+		if reference.VerifiedBy != nil {
+			// Note: VerifiedBy juga dipakai untuk rejection
+			user, err := s.userRepo.FindByID(*reference.VerifiedBy)
+			if err == nil {
+				actorName = user.FullName + " (Dosen Wali)"
+				actorID = reference.VerifiedBy
+			}
+		}
+
+		history = append(history, HistoryEntry{
+			Status:    "rejected",
+			Timestamp: reference.UpdatedAt.Format("2006-01-02 15:04:05"),
+			Actor:     actorName,
+			ActorID:   actorID,
+			Action:    "Achievement rejected",
+			Notes:     reference.RejectionNote,
+		})
+	}
+
+	// 5. Deleted (jika ada)
+	if reference.Status == "deleted" {
+		history = append(history, HistoryEntry{
+			Status:    "deleted",
+			Timestamp: reference.UpdatedAt.Format("2006-01-02 15:04:05"),
+			Action:    "Achievement deleted",
+			Notes:     nil,
+		})
+	}
+
+	return history
+}
+
+
+//
+// ==================== GET ACHIEVEMENTS (GET /achievements) ======================
+// Filtered by role:
+// - Mahasiswa: hanya prestasi sendiri
+// - Dosen Wali: prestasi mahasiswa bimbingannya
+// - Admin: semua prestasi
 //
 
 func (s *AchievementService) GetAchievements(c *fiber.Ctx) error {
-	claims := c.Locals("user").(*model.JWTClaims)
-	
-	// Parse filters
-	filters := &model.AchievementFilters{
-		Status:          c.Query("status", ""),
-		AchievementType: c.Query("achievement_type", ""),
-		Page:            1,
-		PageSize:        10,
+	// Get user dari context
+	claims, ok := c.Locals("user").(*model.JWTClaims)
+	if !ok {
+		return c.Status(401).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "unauthorized",
+		})
 	}
-	
-	if page, err := strconv.Atoi(c.Query("page", "1")); err == nil && page > 0 {
-		filters.Page = page
+
+	// Parse query params
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	pageSize, _ := strconv.Atoi(c.Query("page_size", "10"))
+	status := c.Query("status", "") // filter by status
+
+	if page < 1 {
+		page = 1
 	}
-	if pageSize, err := strconv.Atoi(c.Query("page_size", "10")); err == nil && pageSize > 0 {
-		filters.PageSize = pageSize
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 10
 	}
-	
-	// Apply role-based filters
-	switch claims.Role {
-	case "Mahasiswa":
-		// Mahasiswa hanya lihat prestasi sendiri
+
+	offset := (page - 1) * pageSize
+
+	var references []model.AchievementReference
+	var total int
+	var err error
+
+	// Filter berdasarkan role
+	if claims.Role == "Mahasiswa" {
+		// Get student profile
 		student, err := s.studentRepo.FindByUserID(claims.UserID)
 		if err != nil {
 			return c.Status(404).JSON(model.APIResponse{
@@ -168,10 +328,25 @@ func (s *AchievementService) GetAchievements(c *fiber.Ctx) error {
 				Error:  "student profile not found",
 			})
 		}
-		filters.StudentID = student.ID
-		
-	case "Dosen Wali":
-		// FR-006: Dosen Wali hanya lihat prestasi mahasiswa bimbingannya
+
+		references, err = s.achievementRepo.GetReferencesByStudentID(student.ID, status, pageSize, offset)
+		if err != nil {
+			return c.Status(500).JSON(model.APIResponse{
+				Status: "error",
+				Error:  "failed to fetch achievements",
+			})
+		}
+
+		total, err = s.achievementRepo.CountReferencesByStudentID(student.ID, status)
+		if err != nil {
+			return c.Status(500).JSON(model.APIResponse{
+				Status: "error",
+				Error:  "failed to count achievements",
+			})
+		}
+
+	} else if claims.Role == "Dosen Wali" {
+		// Get lecturer profile
 		lecturer, err := s.lecturerRepo.FindByUserID(claims.UserID)
 		if err != nil {
 			return c.Status(404).JSON(model.APIResponse{
@@ -179,90 +354,72 @@ func (s *AchievementService) GetAchievements(c *fiber.Ctx) error {
 				Error:  "lecturer profile not found",
 			})
 		}
-		filters.AdvisorID = lecturer.ID
-		
-	case "Admin":
-		// Admin bisa lihat semua
-		// No additional filters
-		
-	default:
+
+		references, err = s.achievementRepo.GetReferencesByAdvisorID(lecturer.ID, status, pageSize, offset)
+		if err != nil {
+			return c.Status(500).JSON(model.APIResponse{
+				Status: "error",
+				Error:  "failed to fetch achievements",
+			})
+		}
+
+		total, err = s.achievementRepo.CountReferencesByAdvisorID(lecturer.ID, status)
+		if err != nil {
+			return c.Status(500).JSON(model.APIResponse{
+				Status: "error",
+				Error:  "failed to count achievements",
+			})
+		}
+
+	} else if claims.Role == "Admin" {
+		// Admin dapat melihat semua
+		references, err = s.achievementRepo.GetAllReferences(status, pageSize, offset)
+		if err != nil {
+			return c.Status(500).JSON(model.APIResponse{
+				Status: "error",
+				Error:  "failed to fetch achievements",
+			})
+		}
+
+		total, err = s.achievementRepo.CountAllReferences(status)
+		if err != nil {
+			return c.Status(500).JSON(model.APIResponse{
+				Status: "error",
+				Error:  "failed to count achievements",
+			})
+		}
+	} else {
 		return c.Status(403).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "unauthorized access",
+			Error:  "forbidden",
 		})
 	}
-	
-	// Get references from PostgreSQL
-	references, err := s.achievementRepo.GetReferences(filters)
-	if err != nil {
-		return c.Status(500).JSON(model.APIResponse{
-			Status: "error",
-			Error:  "failed to fetch achievements",
-		})
-	}
-	
-	// Get total count
-	total, err := s.achievementRepo.CountReferences(filters)
-	if err != nil {
-		return c.Status(500).JSON(model.APIResponse{
-			Status: "error",
-			Error:  "failed to count achievements",
-		})
-	}
-	
-	// Get achievement details from MongoDB
-	mongoIDs := make([]string, len(references))
-	for i, ref := range references {
-		mongoIDs[i] = ref.MongoAchievementID
-	}
-	
-	achievements, err := s.achievementRepo.GetAchievements(mongoIDs)
-	if err != nil {
-		return c.Status(500).JSON(model.APIResponse{
-			Status: "error",
-			Error:  "failed to fetch achievement details",
-		})
-	}
-	
-	// Build response
-	achievementMap := make(map[string]*model.Achievement)
-	for i := range achievements {
-		achievementMap[achievements[i].ID] = &achievements[i]
-	}
-	
-	var responses []model.AchievementResponse
+
+	// Fetch details dari MongoDB
+	var achievements []model.AchievementResponse
 	for _, ref := range references {
-		achievement := achievementMap[ref.MongoAchievementID]
-		if achievement == nil {
-			continue
+		achievement, err := s.achievementRepo.GetAchievementByID(ref.MongoAchievementID)
+		if err != nil {
+			continue // Skip jika tidak ditemukan
 		}
-		
-		// Get student info
-		student, _ := s.studentRepo.FindByID(ref.StudentID)
-		
-		// Get verified by info
-		var verifiedByUser *model.User
-		if ref.VerifiedBy != nil {
-			verifiedByUser, _ = s.userRepo.FindByID(*ref.VerifiedBy)
-		}
-		
-		response := s.buildAchievementResponse(&ref, achievement, student, verifiedByUser, nil)
-		responses = append(responses, *response)
+
+		response := s.buildAchievementResponse(achievement, &ref, ref.MongoAchievementID)
+		achievements = append(achievements, *response)
 	}
-	
-	totalPages := int(math.Ceil(float64(total) / float64(filters.PageSize)))
-	
-	listResponse := model.AchievementListResponse{
-		Achievements: responses,
+
+	totalPages := int(math.Ceil(float64(total) / float64(pageSize)))
+
+	response := model.AchievementListResponse{
+		Achievements: achievements,
 		Total:        total,
-		Page:         filters.Page,
-		PageSize:     filters.PageSize,
+		Page:         page,
+		PageSize:     pageSize,
 		TotalPages:   totalPages,
 	}
-	
+
 	return c.JSON(model.APIResponse{
 		Status: "success",
-		Data:   listResponse,
+		Data:   response,
 	})
 }
 
@@ -271,46 +428,58 @@ func (s *AchievementService) GetAchievements(c *fiber.Ctx) error {
 //
 
 func (s *AchievementService) GetAchievementByID(c *fiber.Ctx) error {
-	claims := c.Locals("user").(*model.JWTClaims)
 	achievementID := c.Params("id")
-	
-	// Get reference from PostgreSQL
-	ref, err := s.achievementRepo.GetReferenceByID(achievementID)
+
+	// Get user dari context
+	claims, ok := c.Locals("user").(*model.JWTClaims)
+	if !ok {
+		return c.Status(401).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "unauthorized",
+		})
+	}
+
+	// Get reference dari PostgreSQL
+	reference, err := s.achievementRepo.GetReferenceByID(achievementID)
 	if err != nil {
 		return c.Status(404).JSON(model.APIResponse{
 			Status: "error",
 			Error:  "achievement not found",
 		})
 	}
-	
-	// Authorization check
-	if err := s.checkAchievementAccess(claims, ref); err != nil {
-		return c.Status(403).JSON(model.APIResponse{
-			Status: "error",
-			Error:  err.Error(),
-		})
+
+	// Check authorization
+	if claims.Role == "Mahasiswa" {
+		student, _ := s.studentRepo.FindByUserID(claims.UserID)
+		if student == nil || student.ID != reference.StudentID {
+			return c.Status(403).JSON(model.APIResponse{
+				Status: "error",
+				Error:  "forbidden",
+			})
+		}
+	} else if claims.Role == "Dosen Wali" {
+		lecturer, _ := s.lecturerRepo.FindByUserID(claims.UserID)
+		student, _ := s.studentRepo.FindByID(reference.StudentID)
+		if lecturer == nil || student == nil || student.AdvisorID == nil || *student.AdvisorID != lecturer.ID {
+			return c.Status(403).JSON(model.APIResponse{
+				Status: "error",
+				Error:  "forbidden",
+			})
+		}
 	}
-	
-	// Get achievement from MongoDB
-	achievement, err := s.achievementRepo.GetAchievementByID(ref.MongoAchievementID)
+	// Admin dapat akses semua
+
+	// Get detail dari MongoDB
+	achievement, err := s.achievementRepo.GetAchievementByID(reference.MongoAchievementID)
 	if err != nil {
 		return c.Status(404).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "achievement details not found",
+			Error:  "achievement detail not found",
 		})
 	}
-	
-	// Get student info
-	student, _ := s.studentRepo.FindByID(ref.StudentID)
-	
-	// Get verified by info
-	var verifiedByUser *model.User
-	if ref.VerifiedBy != nil {
-		verifiedByUser, _ = s.userRepo.FindByID(*ref.VerifiedBy)
-	}
-	
-	response := s.buildAchievementResponse(ref, achievement, student, verifiedByUser, nil)
-	
+
+	response := s.buildAchievementResponse(achievement, reference, reference.MongoAchievementID)
+
 	return c.JSON(model.APIResponse{
 		Status: "success",
 		Data:   response,
@@ -318,68 +487,70 @@ func (s *AchievementService) GetAchievementByID(c *fiber.Ctx) error {
 }
 
 //
-// ==================== FR-003 (UPDATE): UPDATE ACHIEVEMENT (PUT /achievements/:id) ======================
-// Actor: Mahasiswa
-// Precondition: Status 'draft'
+// ==================== UPDATE ACHIEVEMENT (PUT /achievements/:id) ======================
+// Hanya mahasiswa pemilik yang bisa update, dan hanya jika status = draft
 //
 
 func (s *AchievementService) UpdateAchievement(c *fiber.Ctx) error {
-	claims := c.Locals("user").(*model.JWTClaims)
 	achievementID := c.Params("id")
-	
-	// Verify user is Mahasiswa
-	if claims.Role != "Mahasiswa" {
-		return c.Status(403).JSON(model.APIResponse{
+
+	// Get user dari context
+	claims, ok := c.Locals("user").(*model.JWTClaims)
+	if !ok {
+		return c.Status(401).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "only students can update achievements",
+			Error:  "unauthorized",
 		})
 	}
-	
+
 	// Get reference
-	ref, err := s.achievementRepo.GetReferenceByID(achievementID)
+	reference, err := s.achievementRepo.GetReferenceByID(achievementID)
 	if err != nil {
 		return c.Status(404).JSON(model.APIResponse{
 			Status: "error",
 			Error:  "achievement not found",
 		})
 	}
-	
-	// Check ownership
-	student, err := s.studentRepo.FindByUserID(claims.UserID)
-	if err != nil || student.ID != ref.StudentID {
+
+	// Check authorization (hanya mahasiswa pemilik)
+	student, _ := s.studentRepo.FindByUserID(claims.UserID)
+	if student == nil || student.ID != reference.StudentID {
 		return c.Status(403).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "you can only update your own achievements",
+			Error:  "forbidden",
 		})
 	}
-	
-	// Check status (can only update draft)
-	if ref.Status != "draft" {
+
+	// Hanya bisa update jika status = draft
+	if reference.Status != "draft" {
 		return c.Status(400).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "can only update draft achievements",
+			Error:  "can only update achievement with status 'draft'",
 		})
 	}
-	
+
 	// Parse request
-	req := new(model.UpdateAchievementRequest)
+	req := new(model.AchievementUpdateRequest)
 	if err := c.BodyParser(req); err != nil {
 		return c.Status(400).JSON(model.APIResponse{
 			Status: "error",
 			Error:  "invalid request body",
 		})
 	}
-	
-	// Get existing achievement from MongoDB
-	achievement, err := s.achievementRepo.GetAchievementByID(ref.MongoAchievementID)
+
+	// Get existing achievement dari MongoDB
+	achievement, err := s.achievementRepo.GetAchievementByID(reference.MongoAchievementID)
 	if err != nil {
 		return c.Status(404).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "achievement details not found",
+			Error:  "achievement detail not found",
 		})
 	}
-	
-	// Update fields
+
+	// Update fields (hanya yang diisi)
+	if req.AchievementType != "" {
+		achievement.AchievementType = req.AchievementType
+	}
 	if req.Title != "" {
 		achievement.Title = req.Title
 	}
@@ -395,21 +566,17 @@ func (s *AchievementService) UpdateAchievement(c *fiber.Ctx) error {
 	if req.Points > 0 {
 		achievement.Points = req.Points
 	}
-	
-	// Update in MongoDB
-	if err := s.achievementRepo.UpdateAchievement(ref.MongoAchievementID, achievement); err != nil {
+
+	// Update di MongoDB
+	if err := s.achievementRepo.UpdateAchievement(reference.MongoAchievementID, achievement); err != nil {
 		return c.Status(500).JSON(model.APIResponse{
 			Status: "error",
 			Error:  "failed to update achievement",
 		})
 	}
-	
-	// Update timestamp in PostgreSQL
-	ref.UpdatedAt = time.Now()
-	s.achievementRepo.UpdateReference(ref)
-	
-	response := s.buildAchievementResponse(ref, achievement, student, nil, nil)
-	
+
+	response := s.buildAchievementResponse(achievement, reference, reference.MongoAchievementID)
+
 	return c.JSON(model.APIResponse{
 		Status:  "success",
 		Message: "achievement updated successfully",
@@ -418,64 +585,71 @@ func (s *AchievementService) UpdateAchievement(c *fiber.Ctx) error {
 }
 
 //
-// ==================== FR-005: DELETE ACHIEVEMENT (DELETE /achievements/:id) ======================
-// Actor: Mahasiswa
-// Precondition: Status 'draft'
-// Flow:
+// ==================== DELETE ACHIEVEMENT (DELETE /achievements/:id) ======================
+// FR-005: Mahasiswa dapat menghapus prestasi draft
+// Flow SRS:
 // 1. Soft delete data di MongoDB
 // 2. Update reference di PostgreSQL
 // 3. Return success message
 //
 
 func (s *AchievementService) DeleteAchievement(c *fiber.Ctx) error {
-	claims := c.Locals("user").(*model.JWTClaims)
 	achievementID := c.Params("id")
-	
-	// Verify user is Mahasiswa
-	if claims.Role != "Mahasiswa" {
-		return c.Status(403).JSON(model.APIResponse{
+
+	// Get user dari context
+	claims, ok := c.Locals("user").(*model.JWTClaims)
+	if !ok {
+		return c.Status(401).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "only students can delete achievements",
+			Error:  "unauthorized",
 		})
 	}
-	
+
 	// Get reference
-	ref, err := s.achievementRepo.GetReferenceByID(achievementID)
+	reference, err := s.achievementRepo.GetReferenceByID(achievementID)
 	if err != nil {
 		return c.Status(404).JSON(model.APIResponse{
 			Status: "error",
 			Error:  "achievement not found",
 		})
 	}
-	
-	// Check ownership
-	student, err := s.studentRepo.FindByUserID(claims.UserID)
-	if err != nil || student.ID != ref.StudentID {
+
+	// Check authorization (hanya mahasiswa pemilik)
+	student, _ := s.studentRepo.FindByUserID(claims.UserID)
+	if student == nil || student.ID != reference.StudentID {
 		return c.Status(403).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "you can only delete your own achievements",
+			Error:  "forbidden",
 		})
 	}
-	
-	// Check status (can only delete draft)
-	if ref.Status != "draft" {
+
+	// Precondition: Hanya bisa delete jika status = draft
+	if reference.Status != "draft" {
 		return c.Status(400).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "can only delete draft achievements",
+			Error:  "can only delete achievement with status 'draft'",
 		})
 	}
-	
-	// Step 1: Soft delete in PostgreSQL (update status to 'deleted')
-	if err := s.achievementRepo.DeleteReference(achievementID); err != nil {
+
+	// FR-005: Soft delete sesuai SRS
+	// 1. Soft delete data di MongoDB
+	if err := s.achievementRepo.DeleteAchievement(reference.MongoAchievementID); err != nil {
 		return c.Status(500).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "failed to delete achievement",
+			Error:  "failed to delete achievement from MongoDB",
 		})
 	}
-	
-	// Step 2: Hard delete from MongoDB (optional, bisa juga soft delete)
-	// s.achievementRepo.DeleteAchievement(ref.MongoAchievementID)
-	
+
+	// 2. Update reference di PostgreSQL dengan status 'deleted'
+	reference.Status = "deleted"
+	if err := s.achievementRepo.UpdateReference(reference); err != nil {
+		return c.Status(500).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "failed to update reference status",
+		})
+	}
+
+	// 3. Return success message
 	return c.JSON(model.APIResponse{
 		Status:  "success",
 		Message: "achievement deleted successfully",
@@ -483,204 +657,156 @@ func (s *AchievementService) DeleteAchievement(c *fiber.Ctx) error {
 }
 
 //
-// ==================== FR-004: SUBMIT FOR VERIFICATION (POST /achievements/:id/submit) ======================
-// Actor: Mahasiswa
-// Precondition: Prestasi berstatus 'draft'
-// Flow:
-// 1. Mahasiswa submit prestasi
-// 2. Update status menjadi 'submitted'
-// 3. Create notification untuk dosen wali (skip for now)
-// 4. Return updated status
+// ==================== SUBMIT FOR VERIFICATION (POST /achievements/:id/submit) ======================
+// FR-004: Mahasiswa submit prestasi draft untuk diverifikasi
 //
 
 func (s *AchievementService) SubmitForVerification(c *fiber.Ctx) error {
-	claims := c.Locals("user").(*model.JWTClaims)
 	achievementID := c.Params("id")
-	
-	// Verify user is Mahasiswa
-	if claims.Role != "Mahasiswa" {
-		return c.Status(403).JSON(model.APIResponse{
+
+	// Get user dari context
+	claims, ok := c.Locals("user").(*model.JWTClaims)
+	if !ok {
+		return c.Status(401).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "only students can submit achievements",
+			Error:  "unauthorized",
 		})
 	}
-	
+
 	// Get reference
-	ref, err := s.achievementRepo.GetReferenceByID(achievementID)
+	reference, err := s.achievementRepo.GetReferenceByID(achievementID)
 	if err != nil {
 		return c.Status(404).JSON(model.APIResponse{
 			Status: "error",
 			Error:  "achievement not found",
 		})
 	}
-	
-	// Check ownership
-	student, err := s.studentRepo.FindByUserID(claims.UserID)
-	if err != nil || student.ID != ref.StudentID {
+
+	// Check authorization
+	student, _ := s.studentRepo.FindByUserID(claims.UserID)
+	if student == nil || student.ID != reference.StudentID {
 		return c.Status(403).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "you can only submit your own achievements",
+			Error:  "forbidden",
 		})
 	}
-	
-	// Check status (must be draft)
-	if ref.Status != "draft" {
+
+	// Hanya bisa submit jika status = draft
+	if reference.Status != "draft" {
 		return c.Status(400).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "achievement must be in draft status to submit",
+			Error:  "achievement already submitted or processed",
 		})
 	}
-	
-	// Check if student has advisor
-	if student.AdvisorID == nil {
-		return c.Status(400).JSON(model.APIResponse{
-			Status: "error",
-			Error:  "cannot submit: no advisor assigned",
-		})
-	}
-	
-	// Step 1 & 2: Update status to 'submitted'
+
+	// Update status menjadi 'submitted'
 	now := time.Now()
-	ref.Status = "submitted"
-	ref.SubmittedAt = &now
-	ref.UpdatedAt = now
-	
-	if err := s.achievementRepo.UpdateReference(ref); err != nil {
+	reference.Status = "submitted"
+	reference.SubmittedAt = &now
+
+	if err := s.achievementRepo.UpdateReference(reference); err != nil {
 		return c.Status(500).JSON(model.APIResponse{
 			Status: "error",
 			Error:  "failed to submit achievement",
 		})
 	}
-	
-	// Step 3: Create notification (TODO: implement notification system)
-	
-	// Step 4: Return response
-	achievement, _ := s.achievementRepo.GetAchievementByID(ref.MongoAchievementID)
-	response := s.buildAchievementResponse(ref, achievement, student, nil, nil)
-	
+
 	return c.JSON(model.APIResponse{
 		Status:  "success",
 		Message: "achievement submitted for verification",
-		Data:    response,
+		Data: fiber.Map{
+			"status":       reference.Status,
+			"submitted_at": reference.SubmittedAt.Format("2006-01-02 15:04:05"),
+		},
 	})
 }
 
 //
-// ==================== FR-007: VERIFY ACHIEVEMENT (POST /achievements/:id/verify) ======================
-// Actor: Dosen Wali
-// Precondition: Status 'submitted'
-// Flow:
-// 1. Dosen review prestasi detail
-// 2. Dosen approve prestasi
-// 3. Update status menjadi 'verified'
-// 4. Set verified_by dan verified_at
-// 5. Return updated status
+// ==================== VERIFY ACHIEVEMENT (POST /achievements/:id/verify) ======================
+// FR-007: Dosen wali memverifikasi prestasi mahasiswa
 //
 
 func (s *AchievementService) VerifyAchievement(c *fiber.Ctx) error {
-	claims := c.Locals("user").(*model.JWTClaims)
 	achievementID := c.Params("id")
-	
-	// Verify user is Dosen Wali
-	if claims.Role != "Dosen Wali" {
-		return c.Status(403).JSON(model.APIResponse{
+
+	// Get user dari context
+	claims, ok := c.Locals("user").(*model.JWTClaims)
+	if !ok {
+		return c.Status(401).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "only lecturers can verify achievements",
+			Error:  "unauthorized",
 		})
 	}
-	
+
 	// Get reference
-	ref, err := s.achievementRepo.GetReferenceByID(achievementID)
+	reference, err := s.achievementRepo.GetReferenceByID(achievementID)
 	if err != nil {
 		return c.Status(404).JSON(model.APIResponse{
 			Status: "error",
 			Error:  "achievement not found",
 		})
 	}
-	
-	// Check if lecturer is the advisor of this student
-	lecturer, err := s.lecturerRepo.FindByUserID(claims.UserID)
-	if err != nil {
-		return c.Status(404).JSON(model.APIResponse{
-			Status: "error",
-			Error:  "lecturer profile not found",
-		})
-	}
-	
-	student, err := s.studentRepo.FindByID(ref.StudentID)
-	if err != nil {
-		return c.Status(404).JSON(model.APIResponse{
-			Status: "error",
-			Error:  "student not found",
-		})
-	}
-	
-	if student.AdvisorID == nil || *student.AdvisorID != lecturer.ID {
+
+	// Check authorization (hanya dosen wali dari mahasiswa tersebut)
+	lecturer, _ := s.lecturerRepo.FindByUserID(claims.UserID)
+	student, _ := s.studentRepo.FindByID(reference.StudentID)
+
+	if lecturer == nil || student == nil || student.AdvisorID == nil || *student.AdvisorID != lecturer.ID {
 		return c.Status(403).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "you can only verify achievements of your advisees",
+			Error:  "forbidden: you are not the advisor of this student",
 		})
 	}
-	
-	// Check status (must be submitted)
-	if ref.Status != "submitted" {
+
+	// Hanya bisa verify jika status = submitted
+	if reference.Status != "submitted" {
 		return c.Status(400).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "achievement must be in submitted status to verify",
+			Error:  "achievement must be in 'submitted' status",
 		})
 	}
-	
-	// Step 2 & 3: Update status to 'verified'
+
+	// Update status menjadi 'verified'
 	now := time.Now()
-	ref.Status = "verified"
-	ref.VerifiedAt = &now
-	ref.VerifiedBy = &claims.UserID
-	ref.UpdatedAt = now
-	ref.RejectionNote = nil // Clear rejection note if any
-	
-	if err := s.achievementRepo.UpdateReference(ref); err != nil {
+	reference.Status = "verified"
+	reference.VerifiedAt = &now
+	reference.VerifiedBy = &claims.UserID
+
+	if err := s.achievementRepo.UpdateReference(reference); err != nil {
 		return c.Status(500).JSON(model.APIResponse{
 			Status: "error",
 			Error:  "failed to verify achievement",
 		})
 	}
-	
-	// Step 5: Return response
-	achievement, _ := s.achievementRepo.GetAchievementByID(ref.MongoAchievementID)
-	verifiedByUser, _ := s.userRepo.FindByID(claims.UserID)
-	response := s.buildAchievementResponse(ref, achievement, student, verifiedByUser, nil)
-	
+
 	return c.JSON(model.APIResponse{
 		Status:  "success",
 		Message: "achievement verified successfully",
-		Data:    response,
+		Data: fiber.Map{
+			"status":      reference.Status,
+			"verified_at": reference.VerifiedAt.Format("2006-01-02 15:04:05"),
+			"verified_by": reference.VerifiedBy,
+		},
 	})
 }
 
 //
-// ==================== FR-008: REJECT ACHIEVEMENT (POST /achievements/:id/reject) ======================
-// Actor: Dosen Wali
-// Precondition: Status 'submitted'
-// Flow:
-// 1. Dosen input rejection note
-// 2. Update status menjadi 'rejected'
-// 3. Save rejection_note
-// 4. Create notification untuk mahasiswa (skip for now)
-// 5. Return updated status
+// ==================== REJECT ACHIEVEMENT (POST /achievements/:id/reject) ======================
+// FR-008: Dosen wali menolak prestasi dengan catatan
 //
 
 func (s *AchievementService) RejectAchievement(c *fiber.Ctx) error {
-	claims := c.Locals("user").(*model.JWTClaims)
 	achievementID := c.Params("id")
-	
-	// Verify user is Dosen Wali
-	if claims.Role != "Dosen Wali" {
-		return c.Status(403).JSON(model.APIResponse{
+
+	// Get user dari context
+	claims, ok := c.Locals("user").(*model.JWTClaims)
+	if !ok {
+		return c.Status(401).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "only lecturers can reject achievements",
+			Error:  "unauthorized",
 		})
 	}
-	
+
 	// Parse request
 	req := new(model.RejectAchievementRequest)
 	if err := c.BodyParser(req); err != nil {
@@ -689,239 +815,251 @@ func (s *AchievementService) RejectAchievement(c *fiber.Ctx) error {
 			Error:  "invalid request body",
 		})
 	}
-	
-	// Validate
+
+	// Validasi
 	if err := s.validate.Struct(req); err != nil {
 		return c.Status(422).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "rejection note is required",
+			Error:  err.Error(),
 		})
 	}
-	
+
 	// Get reference
-	ref, err := s.achievementRepo.GetReferenceByID(achievementID)
+	reference, err := s.achievementRepo.GetReferenceByID(achievementID)
 	if err != nil {
 		return c.Status(404).JSON(model.APIResponse{
 			Status: "error",
 			Error:  "achievement not found",
 		})
 	}
-	
-	// Check if lecturer is the advisor of this student
-	lecturer, err := s.lecturerRepo.FindByUserID(claims.UserID)
-	if err != nil {
-		return c.Status(404).JSON(model.APIResponse{
-			Status: "error",
-			Error:  "lecturer profile not found",
-		})
-	}
-	
-	student, err := s.studentRepo.FindByID(ref.StudentID)
-	if err != nil {
-		return c.Status(404).JSON(model.APIResponse{
-			Status: "error",
-			Error:  "student not found",
-		})
-	}
-	
-	if student.AdvisorID == nil || *student.AdvisorID != lecturer.ID {
+
+	// Check authorization
+	lecturer, _ := s.lecturerRepo.FindByUserID(claims.UserID)
+	student, _ := s.studentRepo.FindByID(reference.StudentID)
+
+	if lecturer == nil || student == nil || student.AdvisorID == nil || *student.AdvisorID != lecturer.ID {
 		return c.Status(403).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "you can only reject achievements of your advisees",
+			Error:  "forbidden: you are not the advisor of this student",
 		})
 	}
-	
-	// Check status (must be submitted)
-	if ref.Status != "submitted" {
+
+	// Hanya bisa reject jika status = submitted
+	if reference.Status != "submitted" {
 		return c.Status(400).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "achievement must be in submitted status to reject",
+			Error:  "achievement must be in 'submitted' status",
 		})
 	}
-	
-	// Step 1, 2, 3: Update status to 'rejected' with note
-	now := time.Now()
-	ref.Status = "rejected"
-	ref.RejectionNote = &req.RejectionNote
-	ref.VerifiedBy = &claims.UserID
-	ref.VerifiedAt = &now
-	ref.UpdatedAt = now
-	
-	if err := s.achievementRepo.UpdateReference(ref); err != nil {
+
+	// Update status menjadi 'rejected'
+	reference.Status = "rejected"
+	reference.RejectionNote = &req.RejectionNote
+
+	if err := s.achievementRepo.UpdateReference(reference); err != nil {
 		return c.Status(500).JSON(model.APIResponse{
 			Status: "error",
 			Error:  "failed to reject achievement",
 		})
 	}
-	
-	// Step 4: Create notification (TODO: implement notification system)
-	
-	// Step 5: Return response
-	achievement, _ := s.achievementRepo.GetAchievementByID(ref.MongoAchievementID)
-	verifiedByUser, _ := s.userRepo.FindByID(claims.UserID)
-	response := s.buildAchievementResponse(ref, achievement, student, verifiedByUser, nil)
-	
+
 	return c.JSON(model.APIResponse{
 		Status:  "success",
 		Message: "achievement rejected",
-		Data:    response,
+		Data: fiber.Map{
+			"status":         reference.Status,
+			"rejection_note": reference.RejectionNote,
+		},
 	})
 }
 
+// Ganti fungsi UploadAttachment yang lama dengan ini:
+
 //
 // ==================== UPLOAD ATTACHMENT (POST /achievements/:id/attachments) ======================
+// Handle REAL file upload dengan multipart/form-data
 //
 
 func (s *AchievementService) UploadAttachment(c *fiber.Ctx) error {
-	claims := c.Locals("user").(*model.JWTClaims)
 	achievementID := c.Params("id")
-	
+
+	// Get user dari context
+	claims, ok := c.Locals("user").(*model.JWTClaims)
+	if !ok {
+		return c.Status(401).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "unauthorized",
+		})
+	}
+
 	// Get reference
-	ref, err := s.achievementRepo.GetReferenceByID(achievementID)
+	reference, err := s.achievementRepo.GetReferenceByID(achievementID)
 	if err != nil {
 		return c.Status(404).JSON(model.APIResponse{
 			Status: "error",
 			Error:  "achievement not found",
 		})
 	}
-	
-	// Check access
-	if err := s.checkAchievementAccess(claims, ref); err != nil {
+
+	// Check authorization (hanya mahasiswa pemilik)
+	student, _ := s.studentRepo.FindByUserID(claims.UserID)
+	if student == nil || student.ID != reference.StudentID {
 		return c.Status(403).JSON(model.APIResponse{
 			Status: "error",
-			Error:  err.Error(),
+			Error:  "forbidden",
 		})
 	}
-	
-	// Parse request
-	req := new(model.UploadAttachmentRequest)
-	if err := c.BodyParser(req); err != nil {
+
+	// Hanya bisa upload jika status = draft atau submitted
+	if reference.Status != "draft" && reference.Status != "submitted" {
 		return c.Status(400).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "invalid request body",
+			Error:  "can only upload attachments for draft or submitted achievements",
 		})
 	}
-	
-	// Validate
-	if err := s.validate.Struct(req); err != nil {
-		return c.Status(422).JSON(model.APIResponse{
+
+	// Parse multipart file
+	file, err := c.FormFile("file")
+	if err != nil {
+		return c.Status(400).JSON(model.APIResponse{
 			Status: "error",
-			Error:  err.Error(),
+			Error:  "file is required",
 		})
 	}
-	
-	// Add attachment
-	attachment := model.Attachment{
-		FileName: req.FileName,
-		FileURL:  req.FileURL,
-		FileType: req.FileType,
+
+	// Validasi ukuran file (max 5MB)
+	maxSize := int64(5 * 1024 * 1024) // 5MB
+	if file.Size > maxSize {
+		return c.Status(400).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "file size exceeds 5MB limit",
+		})
 	}
-	
-	if err := s.achievementRepo.AddAttachment(ref.MongoAchievementID, attachment); err != nil {
+
+	// Validasi tipe file (hanya PDF, JPG, PNG, JPEG)
+	allowedTypes := map[string]bool{
+		"application/pdf":  true,
+		"image/jpeg":       true,
+		"image/jpg":        true,
+		"image/png":        true,
+	}
+
+	// Get MIME type from header
+	fileHeader, err := file.Open()
+	if err != nil {
 		return c.Status(500).JSON(model.APIResponse{
 			Status: "error",
-			Error:  "failed to add attachment",
+			Error:  "failed to read file",
 		})
 	}
-	
-	return c.JSON(model.APIResponse{
+	defer fileHeader.Close()
+
+	// Read first 512 bytes untuk detect MIME type
+	buffer := make([]byte, 512)
+	_, err = fileHeader.Read(buffer)
+	if err != nil {
+		return c.Status(500).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "failed to read file content",
+		})
+	}
+
+	// Detect MIME type
+	contentType := http.DetectContentType(buffer)
+	if !allowedTypes[contentType] {
+		return c.Status(400).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "file type not allowed. Only PDF, JPG, PNG are accepted",
+		})
+	}
+
+	// Generate unique filename
+	timestamp := time.Now().Unix()
+	randomString := uuid.New().String()[:8]
+	ext := filepath.Ext(file.Filename)
+	newFilename := fmt.Sprintf("%s_%d_%s%s", achievementID, timestamp, randomString, ext)
+
+	// Create uploads directory jika belum ada
+	uploadsDir := "./uploads"
+	if _, err := os.Stat(uploadsDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(uploadsDir, 0755); err != nil {
+			return c.Status(500).JSON(model.APIResponse{
+				Status: "error",
+				Error:  "failed to create uploads directory",
+			})
+		}
+	}
+
+	// Simpan file
+	filePath := filepath.Join(uploadsDir, newFilename)
+	if err := c.SaveFile(file, filePath); err != nil {
+		return c.Status(500).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "failed to save file",
+		})
+	}
+
+	// Create attachment object
+	attachment := model.Attachment{
+		FileName:   file.Filename, // Original filename
+		FileURL:    fmt.Sprintf("/uploads/%s", newFilename), // Relative path
+		FileType:   contentType,
+		UploadedAt: time.Now(),
+	}
+
+	// Add attachment ke MongoDB
+	if err := s.achievementRepo.AddAttachment(reference.MongoAchievementID, attachment); err != nil {
+		// Rollback: hapus file yang sudah diupload
+		os.Remove(filePath)
+		return c.Status(500).JSON(model.APIResponse{
+			Status: "error",
+			Error:  "failed to save attachment metadata",
+		})
+	}
+
+	return c.Status(201).JSON(model.APIResponse{
 		Status:  "success",
-		Message: "attachment added successfully",
+		Message: "attachment uploaded successfully",
 		Data:    attachment,
 	})
 }
 
 //
-// ==================== HELPER FUNCTIONS ======================
+// ==================== HELPER: BUILD ACHIEVEMENT RESPONSE ======================
 //
 
-func (s *AchievementService) checkAchievementAccess(claims *model.JWTClaims, ref *model.AchievementReference) error {
-	switch claims.Role {
-	case "Admin":
-		return nil // Admin can access all
-		
-	case "Mahasiswa":
-		student, err := s.studentRepo.FindByUserID(claims.UserID)
-		if err != nil || student.ID != ref.StudentID {
-			return fmt.Errorf("you can only access your own achievements")
-		}
-		return nil
-		
-	case "Dosen Wali":
-		lecturer, err := s.lecturerRepo.FindByUserID(claims.UserID)
-		if err != nil {
-			return fmt.Errorf("lecturer profile not found")
-		}
-		
-		student, err := s.studentRepo.FindByID(ref.StudentID)
-		if err != nil {
-			return fmt.Errorf("student not found")
-		}
-		
-		if student.AdvisorID == nil || *student.AdvisorID != lecturer.ID {
-			return fmt.Errorf("you can only access achievements of your advisees")
-		}
-		return nil
-		
-	default:
-		return fmt.Errorf("unauthorized access")
-	}
-}
-
 func (s *AchievementService) buildAchievementResponse(
-	ref *model.AchievementReference,
 	achievement *model.Achievement,
-	student *model.Student,
-	verifiedByUser *model.User,
-	user *model.User,
+	reference *model.AchievementReference,
+	mongoID string,
 ) *model.AchievementResponse {
 	response := &model.AchievementResponse{
-		ID:              ref.ID,
-		StudentID:       ref.StudentID,
-		AchievementType: achievement.Type,
+		ID:              reference.ID,
+		StudentID:       achievement.StudentID,
+		AchievementType: achievement.AchievementType,
 		Title:           achievement.Title,
 		Description:     achievement.Description,
 		Details:         achievement.Details,
 		Attachments:     achievement.Attachments,
 		Tags:            achievement.Tags,
 		Points:          achievement.Points,
-		Status:          ref.Status,
-		CreatedAt:       ref.CreatedAt.Format("2006-01-02 15:04:05"),
-		UpdatedAt:       ref.UpdatedAt.Format("2006-01-02 15:04:05"),
+		Status:          reference.Status,
+		CreatedAt:       achievement.CreatedAt.Format("2006-01-02 15:04:05"),
+		UpdatedAt:       achievement.UpdatedAt.Format("2006-01-02 15:04:05"),
 	}
-	
-	// Add student info
-	if student != nil {
-		response.StudentNIM = student.StudentID
-		// Get student user info for name
-		if studentUser, err := s.userRepo.FindByID(student.UserID); err == nil {
-			response.StudentName = studentUser.FullName
-		}
+
+	if reference.SubmittedAt != nil {
+		submittedAt := reference.SubmittedAt.Format("2006-01-02 15:04:05")
+		response.SubmittedAt = &submittedAt
 	}
-	
-	// Add submitted_at
-	if ref.SubmittedAt != nil {
-		submittedStr := ref.SubmittedAt.Format("2006-01-02 15:04:05")
-		response.SubmittedAt = &submittedStr
+
+	if reference.VerifiedAt != nil {
+		verifiedAt := reference.VerifiedAt.Format("2006-01-02 15:04:05")
+		response.VerifiedAt = &verifiedAt
 	}
-	
-	// Add verified info
-	if ref.VerifiedAt != nil {
-		verifiedStr := ref.VerifiedAt.Format("2006-01-02 15:04:05")
-		response.VerifiedAt = &verifiedStr
-	}
-	
-	if ref.VerifiedBy != nil {
-		response.VerifiedBy = ref.VerifiedBy
-		if verifiedByUser != nil {
-			response.VerifiedByName = &verifiedByUser.FullName
-		}
-	}
-	
-	// Add rejection note
-	if ref.RejectionNote != nil {
-		response.RejectionNote = ref.RejectionNote
-	}
-	
+
+	response.VerifiedBy = reference.VerifiedBy
+	response.RejectionNote = reference.RejectionNote
+
 	return response
 }

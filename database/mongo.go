@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"log"
+	"UASBE/config"
 	"time"
 
 	"go.mongodb.org/mongo-driver/mongo"
@@ -11,27 +12,22 @@ import (
 
 var MongoDB *mongo.Database
 
-func ConnectMongoDB(uri, dbName string) error {
+func ConnectMongoDB() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Connect to MongoDB
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
+	clientOptions := options.Client().ApplyURI(config.AppConfig.MongoURL)
+	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {
-		return err
+		log.Fatal("Failed to connect to MongoDB:", err)
 	}
 
-	// Ping to verify connection
-	if err := client.Ping(ctx, nil); err != nil {
-		return err
+	// Ping MongoDB untuk memastikan koneksi berhasil
+	err = client.Ping(ctx, nil)
+	if err != nil {
+		log.Fatal("Failed to ping MongoDB:", err)
 	}
 
-	MongoDB = client.Database(dbName)
-	log.Println("✅ Connected to MongoDB successfully!")
-	return nil
-}
-
-// GetCollection returns a MongoDB collection
-func GetCollection(collectionName string) *mongo.Collection {
-	return MongoDB.Collection(collectionName)
+	MongoDB = client.Database(config.AppConfig.MongoDB)
+	log.Println("MongoDB connected successfully")
 }
