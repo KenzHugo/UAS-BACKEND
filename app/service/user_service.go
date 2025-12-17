@@ -150,7 +150,7 @@ func (s *UserService) CreateUser(c *fiber.Ctx) error {
 
 		// Create student profile
 		student := &model.Student{
-			UserID:       user.ID,
+			ID:       user.ID,
 			StudentID:    req.StudentProfile.StudentID,
 			ProgramStudy: req.StudentProfile.ProgramStudy,
 			AcademicYear: req.StudentProfile.AcademicYear,
@@ -188,7 +188,7 @@ func (s *UserService) CreateUser(c *fiber.Ctx) error {
 
 		// Create lecturer profile
 		lecturer := &model.Lecturer{
-			UserID:     user.ID,
+			ID:     user.ID,
 			LecturerID: req.LecturerProfile.LecturerID,
 			Department: req.LecturerProfile.Department,
 		}
@@ -483,7 +483,6 @@ func (s *UserService) buildUserResponse(user *model.User, roleName string) *mode
 		if err == nil {
 			response.StudentProfile = &model.StudentResponse{
 				ID:           student.ID,
-				UserID:       student.UserID,
 				StudentID:    student.StudentID,
 				ProgramStudy: student.ProgramStudy,
 				AcademicYear: student.AcademicYear,
@@ -498,7 +497,6 @@ func (s *UserService) buildUserResponse(user *model.User, roleName string) *mode
 		if err == nil {
 			response.LecturerProfile = &model.LecturerResponse{
 				ID:         lecturer.ID,
-				UserID:     lecturer.UserID,
 				LecturerID: lecturer.LecturerID,
 				Department: lecturer.Department,
 				CreatedAt:  lecturer.CreatedAt.Format("2006-01-02 15:04:05"),

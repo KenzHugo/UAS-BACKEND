@@ -44,6 +44,7 @@ func UserRoutes(app *fiber.App, userService *service.UserService) {
 
 //
 // ==================== STUDENT ROUTES ======================
+// Sesuai SRS Section 5.5: Students & Lecturers Endpoints
 //
 
 func StudentRoutes(app *fiber.App, studentService *service.StudentService) {
@@ -52,13 +53,56 @@ func StudentRoutes(app *fiber.App, studentService *service.StudentService) {
 	// Auth required untuk semua endpoint
 	students.Use(middleware.AuthRequired)
 
-	students.Get("/", studentService.GetAllStudents)           // GET /api/v1/students
-	students.Get("/:id", studentService.GetStudentByID)        // GET /api/v1/students/:id
-	students.Put("/:id/advisor", studentService.SetAdvisor)    // PUT /api/v1/students/:id/advisor
-	
-	// TODO: GET /api/v1/students/:id/achievements (nanti saat implement achievements)
+	// GET /api/v1/students - List all students
+	students.Get("/", 
+		middleware.RequirePermission("achievement:read"), 
+		studentService.GetAllStudents,
+	)
+
+	// GET /api/v1/students/:id - Student detail
+	students.Get("/:id",
+		middleware.RequirePermission("achievement:read"),
+		studentService.GetStudentByID,
+	)
+
+	// GET /api/v1/students/:id/achievements - List achievements milik student
+	students.Get("/:id/achievements",
+		middleware.RequirePermission("achievement:read"),
+		studentService.GetStudentAchievements,
+	)
+
+	// PUT /api/v1/students/:id/advisor - Set/update advisor untuk student
+	students.Put("/:id/advisor",
+		middleware.RequirePermission("user:manage"),
+		studentService.SetAdvisor,
+	)
 }
 
+//
+// ==================== LECTURER ROUTES ======================
+// Sesuai SRS Section 5.5: Students & Lecturers Endpoints
+//
+
+func LecturerRoutes(app *fiber.App, lecturerService *service.LecturerService) {
+	lecturers := app.Group("/api/v1/lecturers")
+
+	// Auth required untuk semua endpoint
+	lecturers.Use(middleware.AuthRequired)
+
+	// GET /api/v1/lecturers - List all lecturers
+	lecturers.Get("/",
+		middleware.RequirePermission("achievement:read"),
+		lecturerService.GetAllLecturers,
+	)
+
+	// GET /api/v1/lecturers/:id/advisees - List mahasiswa bimbingan lecturer
+	lecturers.Get("/:id/advisees",
+		middleware.RequirePermission("achievement:read"),
+		lecturerService.GetLecturerAdvisees,
+	)
+}
+
+//
 // ==================== ACHIEVEMENT ROUTES ======================
 //
 
@@ -69,9 +113,6 @@ func AchievementRoutes(app *fiber.App, achievementService *service.AchievementSe
 	achievements.Use(middleware.AuthRequired)
 
 	// GET /achievements - List achievements (filtered by role)
-	// Mahasiswa: achievement:read (own)
-	// Dosen Wali: achievement:read (advisees)
-	// Admin: achievement:read (all)
 	achievements.Get("/", 
 		middleware.RequirePermission("achievement:read"),
 		achievementService.GetAchievements,
@@ -126,8 +167,8 @@ func AchievementRoutes(app *fiber.App, achievementService *service.AchievementSe
 	)
 
 	// GET /achievements/:id/history - History achievement
-    achievements.Get("/:id/history",
-        middleware.RequirePermission("achievement:read"),
-        achievementService.GetAchievementHistory,
-    )
+	achievements.Get("/:id/history",
+		middleware.RequirePermission("achievement:read"),
+		achievementService.GetAchievementHistory,
+	)
 }

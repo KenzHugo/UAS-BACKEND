@@ -26,36 +26,40 @@ func NewLecturerRepository(db *sql.DB) LecturerRepository {
 }
 
 // Create - Insert lecturer baru
+// PENTING: id = user_id (sesuai migration: id REFERENCES users(id))
+// Tidak ada kolom user_id terpisah!
 func (r *lecturerRepository) Create(lecturer *model.Lecturer) error {
-	// PENTING: Karena One-to-One dengan Users, ID Lecturer HARUS SAMA dengan UserID.
-	// Jangan generate UUID baru, pakai UserID yang sudah ada.
-	lecturer.ID = lecturer.UserID 
+	// ID sudah di-set dari luar (= user.id saat create user)
 	lecturer.CreatedAt = time.Now()
 
-	// Query disesuaikan: Hapus 'user_id' karena tidak ada kolom itu di tabel migration Anda
 	query := `
 		INSERT INTO lecturers (id, lecturer_id, department, created_at)
 		VALUES ($1, $2, $3, $4)
 	`
 	_, err := r.db.Exec(query,
-		lecturer.ID,         // Ini sekaligus menjadi Foreign Key ke users.id
-		lecturer.LecturerID,
+		lecturer.ID,         // id = user_id
+		lecturer.LecturerID, // lecturer_id (NIP)
 		lecturer.Department,
 		lecturer.CreatedAt,
 	)
 	return err
 }
 
-// FindByUserID - Cari lecturer berdasarkan user_id (Sama dengan ID)
+// FindByUserID - Cari lecturer berdasarkan user_id
+// Karena id = user_id, maka sama dengan FindByID
 func (r *lecturerRepository) FindByUserID(userID string) (*model.Lecturer, error) {
+	return r.FindByID(userID)
+}
+
+// FindByID - Cari lecturer berdasarkan ID
+func (r *lecturerRepository) FindByID(id string) (*model.Lecturer, error) {
 	lecturer := &model.Lecturer{}
-	// Karena ID = UserID, kita query berdasarkan ID saja
 	query := `
 		SELECT id, lecturer_id, department, created_at
 		FROM lecturers
 		WHERE id = $1
 	`
-	err := r.db.QueryRow(query, userID).Scan(
+	err := r.db.QueryRow(query, id).Scan(
 		&lecturer.ID,
 		&lecturer.LecturerID,
 		&lecturer.Department,
@@ -64,15 +68,7 @@ func (r *lecturerRepository) FindByUserID(userID string) (*model.Lecturer, error
 	if err != nil {
 		return nil, err
 	}
-	// Manual set UserID agar struct tetap konsisten
-	lecturer.UserID = lecturer.ID 
 	return lecturer, nil
-}
-
-// FindByID - Cari lecturer berdasarkan ID
-func (r *lecturerRepository) FindByID(id string) (*model.Lecturer, error) {
-	// Logikanya sama persis dengan FindByUserID karena One-to-One
-	return r.FindByUserID(id)
 }
 
 // FindByLecturerID - Cari lecturer berdasarkan lecturer_id (NIP)
@@ -92,7 +88,6 @@ func (r *lecturerRepository) FindByLecturerID(lecturerID string) (*model.Lecture
 	if err != nil {
 		return nil, err
 	}
-	lecturer.UserID = lecturer.ID
 	return lecturer, nil
 }
 
@@ -140,7 +135,6 @@ func (r *lecturerRepository) GetAll(limit, offset int) ([]model.Lecturer, error)
 		if err != nil {
 			continue
 		}
-		l.UserID = l.ID // Map ID ke UserID
 		lecturers = append(lecturers, l)
 	}
 	return lecturers, nil

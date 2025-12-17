@@ -42,7 +42,13 @@ func main() {
 	// Initialize services
 	authService := service.NewAuthService(userRepo, roleRepo, permRepo)
 	userService := service.NewUserService(userRepo, roleRepo, permRepo, studentRepo, lecturerRepo)
-	studentService := service.NewStudentService(studentRepo, lecturerRepo, userRepo)
+	
+	// ⭐ UPDATE: StudentService dengan 4 parameters
+	studentService := service.NewStudentService(studentRepo, lecturerRepo, achievementRepo, userRepo)
+	
+	// ⭐ NEW: LecturerService
+	lecturerService := service.NewLecturerService(lecturerRepo, studentRepo, achievementRepo, userRepo)
+	
 	achievementService := service.NewAchievementService(achievementRepo, studentRepo, lecturerRepo, userRepo)
 
 	// Initialize Fiber app
@@ -59,6 +65,9 @@ func main() {
 	app.Use(cors.New())
 	app.Use(logger.New())
 
+	// Serve static files untuk uploads
+	app.Static("/uploads", "./uploads")
+
 	// Health check
 	app.Get("/", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
@@ -71,6 +80,7 @@ func main() {
 	routes.AuthRoutes(app, authService)
 	routes.UserRoutes(app, userService)
 	routes.StudentRoutes(app, studentService)
+	routes.LecturerRoutes(app, lecturerService) // ⭐ NEW: Register lecturer routes
 	routes.AchievementRoutes(app, achievementService)
 
 	// Start server

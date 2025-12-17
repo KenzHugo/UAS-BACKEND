@@ -2,7 +2,6 @@ package repository
 
 import (
 	"database/sql"
-	"fmt"
 	"UASBE/app/model"
 	"time"
 )
@@ -28,17 +27,11 @@ func NewStudentRepository(db *sql.DB) StudentRepository {
 }
 
 // Create - Insert student baru
-// SESUAI MIGRATION: id = user_id, academic_year = INT
+// PENTING: id = user_id (sesuai migration: id REFERENCES users(id))
+// Tidak ada kolom user_id terpisah!
 func (r *studentRepository) Create(student *model.Student) error {
-	// ID = user_id (sesuai migration: id REFERENCES users(id))
-	student.ID = student.UserID
+	// ID sudah di-set dari luar (= user.id saat create user)
 	student.CreatedAt = time.Now()
-
-	// Convert academic_year string to int
-	var academicYear int
-	if student.AcademicYear != "" {
-		fmt.Sscanf(student.AcademicYear, "%d", &academicYear)
-	}
 
 	query := `
 		INSERT INTO students (id, student_id, program_study, academic_year, advisor_id, created_at)
@@ -48,45 +41,22 @@ func (r *studentRepository) Create(student *model.Student) error {
 		student.ID,           // id = user_id
 		student.StudentID,    // student_id (NIM)
 		student.ProgramStudy, // program_study
-		academicYear,         // academic_year (INT)
-		student.AdvisorID,    // advisor_id
+		student.AcademicYear, // academic_year (INT)
+		student.AdvisorID,    // advisor_id (nullable)
 		student.CreatedAt,
 	)
 	return err
 }
 
-// FindByUserID - Cari student berdasarkan user_id (id = user_id)
+// FindByUserID - Cari student berdasarkan user_id
+// Karena id = user_id, maka sama dengan FindByID
 func (r *studentRepository) FindByUserID(userID string) (*model.Student, error) {
-	student := &model.Student{}
-	var academicYear int
-	
-	query := `
-		SELECT id, student_id, program_study, academic_year, advisor_id, created_at
-		FROM students
-		WHERE id = $1
-	`
-	
-	err := r.db.QueryRow(query, userID).Scan(
-		&student.ID,
-		&student.StudentID,
-		&student.ProgramStudy,
-		&academicYear,
-		&student.AdvisorID,
-		&student.CreatedAt,
-	)
-	if err != nil {
-		return nil, err
-	}
-	
-	student.UserID = student.ID // id = user_id
-	student.AcademicYear = fmt.Sprintf("%d", academicYear)
-	return student, nil
+	return r.FindByID(userID)
 }
 
 // FindByID - Cari student berdasarkan ID
 func (r *studentRepository) FindByID(id string) (*model.Student, error) {
 	student := &model.Student{}
-	var academicYear int
 	
 	query := `
 		SELECT id, student_id, program_study, academic_year, advisor_id, created_at
@@ -98,7 +68,7 @@ func (r *studentRepository) FindByID(id string) (*model.Student, error) {
 		&student.ID,
 		&student.StudentID,
 		&student.ProgramStudy,
-		&academicYear,
+		&student.AcademicYear,
 		&student.AdvisorID,
 		&student.CreatedAt,
 	)
@@ -106,15 +76,12 @@ func (r *studentRepository) FindByID(id string) (*model.Student, error) {
 		return nil, err
 	}
 	
-	student.UserID = student.ID
-	student.AcademicYear = fmt.Sprintf("%d", academicYear)
 	return student, nil
 }
 
 // FindByStudentID - Cari student berdasarkan student_id (NIM)
 func (r *studentRepository) FindByStudentID(studentID string) (*model.Student, error) {
 	student := &model.Student{}
-	var academicYear int
 	
 	query := `
 		SELECT id, student_id, program_study, academic_year, advisor_id, created_at
@@ -126,7 +93,7 @@ func (r *studentRepository) FindByStudentID(studentID string) (*model.Student, e
 		&student.ID,
 		&student.StudentID,
 		&student.ProgramStudy,
-		&academicYear,
+		&student.AcademicYear,
 		&student.AdvisorID,
 		&student.CreatedAt,
 	)
@@ -134,16 +101,11 @@ func (r *studentRepository) FindByStudentID(studentID string) (*model.Student, e
 		return nil, err
 	}
 	
-	student.UserID = student.ID
-	student.AcademicYear = fmt.Sprintf("%d", academicYear)
 	return student, nil
 }
 
 // Update - Update data student
 func (r *studentRepository) Update(student *model.Student) error {
-	var academicYear int
-	fmt.Sscanf(student.AcademicYear, "%d", &academicYear)
-	
 	query := `
 		UPDATE students
 		SET program_study = $1, academic_year = $2, advisor_id = $3
@@ -151,7 +113,7 @@ func (r *studentRepository) Update(student *model.Student) error {
 	`
 	_, err := r.db.Exec(query,
 		student.ProgramStudy,
-		academicYear,
+		student.AcademicYear,
 		student.AdvisorID,
 		student.ID,
 	)
@@ -193,13 +155,12 @@ func (r *studentRepository) GetAll(limit, offset int) ([]model.Student, error) {
 	var students []model.Student
 	for rows.Next() {
 		var s model.Student
-		var academicYear int
 		
 		err := rows.Scan(
 			&s.ID,
 			&s.StudentID,
 			&s.ProgramStudy,
-			&academicYear,
+			&s.AcademicYear,
 			&s.AdvisorID,
 			&s.CreatedAt,
 		)
@@ -207,8 +168,6 @@ func (r *studentRepository) GetAll(limit, offset int) ([]model.Student, error) {
 			continue
 		}
 		
-		s.UserID = s.ID
-		s.AcademicYear = fmt.Sprintf("%d", academicYear)
 		students = append(students, s)
 	}
 	return students, nil
