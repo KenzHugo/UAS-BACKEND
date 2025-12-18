@@ -9,10 +9,32 @@ import (
 	"UASBE/database"
 	"UASBE/utils"
 
+	_ "UASBE/docs" // ← TAMBAHKAN INI (Import swagger docs)
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
+	"github.com/gofiber/swagger" // ← TAMBAHKAN INI
 )
+
+// @title Sistem Pelaporan Prestasi Mahasiswa API
+// @version 1.0
+// @description API untuk sistem pelaporan prestasi mahasiswa dengan RBAC
+// @termsOfService http://swagger.io/terms/
+
+// @contact.name API Support
+// @contact.email support@example.com
+
+// @license.name Apache 2.0
+// @license.url http://www.apache.org/licenses/LICENSE-2.0.html
+
+// @host localhost:3000
+// @BasePath /api/v1
+
+// @securityDefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
+// @description Type "Bearer" followed by a space and JWT token.
 
 func main() {
 	// Load config
@@ -65,11 +87,15 @@ func main() {
 	// Serve static files untuk uploads
 	app.Static("/uploads", "./uploads")
 
+	// ← TAMBAHKAN INI: Swagger route
+	app.Get("/swagger/*", swagger.HandlerDefault)
+
 	// Health check
 	app.Get("/", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
 			"status":  "success",
 			"message": "API is running",
+			"swagger": "/swagger/index.html", // ← Info Swagger
 		})
 	})
 
@@ -88,5 +114,6 @@ func main() {
 	}
 
 	log.Printf("Server running on port %s", port)
+	log.Printf("Swagger UI: http://localhost:%s/swagger/index.html", port) // ← Log Swagger URL
 	log.Fatal(app.Listen(":" + port))
 }
