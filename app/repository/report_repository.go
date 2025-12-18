@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -48,34 +49,24 @@ func (r *reportRepository) GetTotalByType(studentID *string, advisorID *string) 
 	defer cancel()
 
 	// Build filter based on scope
-	var studentIDs []string
-	if studentID != nil {
-		// Specific student
-		studentIDs = []string{*studentID}
-	} else if advisorID != nil {
-		// All students of advisor
-		query := `SELECT id FROM students WHERE advisor_id = $1`
-		rows, err := r.pgDB.Query(query, *advisorID)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var id string
-			rows.Scan(&id)
-			studentIDs = append(studentIDs, id)
-		}
-	}
-
-	// Get verified achievements only
 	var refQuery string
 	var args []interface{}
 	
-	if len(studentIDs) > 0 {
-		refQuery = `SELECT mongo_achievement_id FROM achievement_references WHERE status = 'verified' AND student_id = ANY($1)`
-		args = append(args, studentIDs)
+	if studentID != nil {
+		// Specific student
+		refQuery = `SELECT mongo_achievement_id FROM achievement_references WHERE status = 'verified' AND student_id = $1`
+		args = append(args, *studentID)
+	} else if advisorID != nil {
+		// All students of advisor
+		refQuery = `
+			SELECT ar.mongo_achievement_id 
+			FROM achievement_references ar
+			JOIN students s ON ar.student_id = s.id
+			WHERE ar.status = 'verified' AND s.advisor_id = $1
+		`
+		args = append(args, *advisorID)
 	} else {
+		// All achievements
 		refQuery = `SELECT mongo_achievement_id FROM achievement_references WHERE status = 'verified'`
 	}
 
@@ -85,22 +76,31 @@ func (r *reportRepository) GetTotalByType(studentID *string, advisorID *string) 
 	}
 	defer rows.Close()
 
-	var mongoIDs []string
-	for rows.Next() {
-		var id string
-		rows.Scan(&id)
-		mongoIDs = append(mongoIDs, id)
-	}
-
 	// Count by type from MongoDB
 	result := make(map[string]int)
 	
-	for _, mongoID := range mongoIDs {
+	for rows.Next() {
+		var mongoID string
+		rows.Scan(&mongoID)
+		
+		// Convert hex string to ObjectID
+		objectID, err := primitive.ObjectIDFromHex(mongoID)
+		if err != nil {
+			// Log error jika ObjectID invalid
+			println("ERROR: Invalid ObjectID:", mongoID, err.Error())
+			continue
+		}
+		
 		var achievement model.Achievement
-		filter := bson.M{"_id": bson.M{"$oid": mongoID}}
-		err := collection.FindOne(ctx, filter).Decode(&achievement)
+		filter := bson.M{"_id": objectID}
+		err = collection.FindOne(ctx, filter).Decode(&achievement)
 		if err == nil {
 			result[achievement.AchievementType]++
+			// Debug log
+			println("Found achievement:", achievement.Title, "Points:", achievement.Points)
+		} else {
+			// Log error jika achievement tidak ditemukan
+			println("ERROR: Achievement not found in MongoDB:", mongoID, err.Error())
 		}
 	}
 
@@ -118,7 +118,7 @@ func (r *reportRepository) GetTotalByPeriod(studentID *string, advisorID *string
 				TO_CHAR(verified_at, 'YYYY-MM') as period,
 				COUNT(*) as count
 			FROM achievement_references
-			WHERE status = 'verified' AND student_id = $1
+			WHERE status = 'verified' AND student_id = $1 AND verified_at IS NOT NULL
 			GROUP BY TO_CHAR(verified_at, 'YYYY-MM')
 			ORDER BY period DESC
 			LIMIT 12
@@ -131,7 +131,7 @@ func (r *reportRepository) GetTotalByPeriod(studentID *string, advisorID *string
 				COUNT(*) as count
 			FROM achievement_references ar
 			JOIN students s ON ar.student_id = s.id
-			WHERE ar.status = 'verified' AND s.advisor_id = $1
+			WHERE ar.status = 'verified' AND s.advisor_id = $1 AND ar.verified_at IS NOT NULL
 			GROUP BY TO_CHAR(ar.verified_at, 'YYYY-MM')
 			ORDER BY period DESC
 			LIMIT 12
@@ -143,7 +143,7 @@ func (r *reportRepository) GetTotalByPeriod(studentID *string, advisorID *string
 				TO_CHAR(verified_at, 'YYYY-MM') as period,
 				COUNT(*) as count
 			FROM achievement_references
-			WHERE status = 'verified'
+			WHERE status = 'verified' AND verified_at IS NOT NULL
 			GROUP BY TO_CHAR(verified_at, 'YYYY-MM')
 			ORDER BY period DESC
 			LIMIT 12
@@ -246,9 +246,14 @@ func (r *reportRepository) GetTopStudents(limit int, advisorID *string) ([]model
 			var mongoID string
 			achRows.Scan(&mongoID)
 			
+			objectID, err := primitive.ObjectIDFromHex(mongoID)
+			if err != nil {
+				continue
+			}
+			
 			var achievement model.Achievement
-			filter := bson.M{"_id": bson.M{"$oid": mongoID}}
-			err := collection.FindOne(ctx, filter).Decode(&achievement)
+			filter := bson.M{"_id": objectID}
+			err = collection.FindOne(ctx, filter).Decode(&achievement)
 			if err == nil {
 				totalPoints += achievement.Points
 			}
@@ -299,9 +304,14 @@ func (r *reportRepository) GetCompetitionLevelDistribution(studentID *string, ad
 		var mongoID string
 		rows.Scan(&mongoID)
 		
+		objectID, err := primitive.ObjectIDFromHex(mongoID)
+		if err != nil {
+			continue
+		}
+		
 		var achievement model.Achievement
-		filter := bson.M{"_id": bson.M{"$oid": mongoID}}
-		err := collection.FindOne(ctx, filter).Decode(&achievement)
+		filter := bson.M{"_id": objectID}
+		err = collection.FindOne(ctx, filter).Decode(&achievement)
 		
 		if err == nil && achievement.AchievementType == "competition" {
 			// Get competition level from details
@@ -410,9 +420,14 @@ func (r *reportRepository) GetStudentSummary(studentID string) (*model.StudentSu
 		var mongoID string
 		rows.Scan(&mongoID)
 		
+		objectID, err := primitive.ObjectIDFromHex(mongoID)
+		if err != nil {
+			continue
+		}
+		
 		var achievement model.Achievement
-		filter := bson.M{"_id": bson.M{"$oid": mongoID}}
-		err := collection.FindOne(ctx, filter).Decode(&achievement)
+		filter := bson.M{"_id": objectID}
+		err = collection.FindOne(ctx, filter).Decode(&achievement)
 		if err == nil {
 			totalPoints += achievement.Points
 		}
